@@ -14,11 +14,13 @@
 # limitations under the License.
 
 ###########################################################################
-# Example Sim Cloth Self Contact
+# Example Cloth Twist
 #
 # This simulation demonstrates twisting an FEM cloth model using the VBD
 # solver, showcasing its ability to handle complex self-contacts while
 # ensuring it remains intersection-free.
+#
+# Command: python -m newton.examples cloth_twist
 #
 ###########################################################################
 
@@ -28,10 +30,11 @@ import os
 import numpy as np
 import warp as wp
 import warp.examples
-from pxr import Usd, UsdGeom
+from pxr import Usd
 
 import newton
 import newton.examples
+import newton.usd
 from newton import ParticleFlags
 
 
@@ -121,7 +124,7 @@ def apply_rotation(
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args=None):
         # setup simulation parameters first
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -144,10 +147,11 @@ class Example:
         self.viewer = viewer
 
         usd_stage = Usd.Stage.Open(os.path.join(warp.examples.get_asset_directory(), "square_cloth.usd"))
-        usd_geom = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/root/cloth/cloth"))
+        usd_prim = usd_stage.GetPrimAtPath("/root/cloth/cloth")
 
-        mesh_points = np.array(usd_geom.GetPointsAttr().Get())
-        mesh_indices = np.array(usd_geom.GetFaceVertexIndicesAttr().Get())
+        cloth_mesh = newton.usd.get_mesh(usd_prim)
+        mesh_points = cloth_mesh.vertices
+        mesh_indices = cloth_mesh.indices
 
         vertices = [wp.vec3(v) for v in mesh_points]
         self.faces = mesh_indices.reshape(-1, 3)
@@ -188,14 +192,15 @@ class Example:
         self.solver = newton.solvers.SolverVBD(
             self.model,
             self.iterations,
-            handle_self_contact=True,
-            self_contact_radius=0.002,
-            self_contact_margin=0.0035,
+            particle_enable_self_contact=True,
+            particle_self_contact_radius=0.002,
+            particle_self_contact_margin=0.0035,
         )
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+
+        self.contacts = self.model.contacts()
 
         rot_axes = [[0, 1, 0]] * len(right_side) + [[0, -1, 0]] * len(left_side)
 
@@ -224,6 +229,7 @@ class Example:
         )
 
         self.viewer.set_model(self.model)
+        self.viewer.set_camera(wp.vec3(2.25, 0.0, 0.0), 0.0, -180.0)
 
         # put graph capture into it's own function
         self.capture()
@@ -236,7 +242,7 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0)
+        self.model.collide(self.state_0, self.contacts)
         self.solver.rebuild_bvh(self.state_0)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
@@ -276,9 +282,6 @@ class Example:
 
         self.sim_time += self.frame_dt
 
-    def test(self):
-        pass
-
     def render(self):
         if self.viewer is None:
             return
@@ -290,6 +293,20 @@ class Example:
         self.viewer.log_state(self.state_0)
         self.viewer.end_frame()
 
+    def test_final(self):
+        p_lower = wp.vec3(-0.6, -0.9, -0.6)
+        p_upper = wp.vec3(0.6, 0.9, 0.6)
+        newton.examples.test_particle_state(
+            self.state_0,
+            "particles are within a reasonable volume",
+            lambda q, qd: newton.math.vec_inside_limits(q, p_lower, p_upper),
+        )
+        newton.examples.test_particle_state(
+            self.state_0,
+            "particle velocities are within a reasonable range",
+            lambda q, qd: max(abs(qd)) < 1.0,
+        )
+
 
 if __name__ == "__main__":
     # Parse arguments and initialize viewer
@@ -299,6 +316,6 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init(parser)
 
     # Create example and run
-    example = Example(viewer)
+    example = Example(viewer, args)
 
-    newton.examples.run(example)
+    newton.examples.run(example, args)

@@ -13,19 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import numpy as np
 import warp as wp
-from pxr import Usd, UsdGeom
+from pxr import Usd
 
 import newton
 import newton.examples
+import newton.usd
 import newton.utils
 from newton import Mesh, ParticleFlags
-from newton._src.solvers.style3d import CollisionHandler
+from newton.solvers import style3d
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args=None):
         # setup simulation parameters first
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -38,7 +38,8 @@ class Example:
         self.iterations = 4
 
         self.viewer = viewer
-        builder = newton.Style3DModelBuilder(up_axis=newton.Axis.Z)
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverStyle3D.register_custom_attributes(builder)
 
         use_cloth_mesh = True
         if use_cloth_mesh:
@@ -50,33 +51,37 @@ class Example:
             garment_usd_name = "Women_Sweatshirt"
 
             usd_stage = Usd.Stage.Open(str(asset_path / "garments" / (garment_usd_name + ".usd")))
-            usd_geom_garment = UsdGeom.Mesh(usd_stage.GetPrimAtPath(str("/Root/" + garment_usd_name + "/Root_Garment")))
+            usd_prim_garment = usd_stage.GetPrimAtPath(str("/Root/" + garment_usd_name + "/Root_Garment"))
 
-            garment_prim = UsdGeom.PrimvarsAPI(usd_geom_garment.GetPrim()).GetPrimvar("st")
-            garment_mesh_indices = np.array(usd_geom_garment.GetFaceVertexIndicesAttr().Get())
-            garment_mesh_points = np.array(usd_geom_garment.GetPointsAttr().Get())
-            garment_mesh_uv_indices = np.array(garment_prim.GetIndices())
-            garment_mesh_uv = np.array(garment_prim.Get()) * 1e-3
+            garment_mesh, garment_mesh_uv_indices = newton.usd.get_mesh(
+                usd_prim_garment,
+                load_uvs=True,
+                preserve_facevarying_uvs=True,
+                return_uv_indices=True,
+            )
+            garment_mesh_uv = garment_mesh.uvs * 1.0e-3
 
             # Avatar
             usd_stage = Usd.Stage.Open(str(asset_path / "avatars" / "Female.usd"))
-            usd_geom_avatar = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/Root/Female/Root_SkinnedMesh_Avatar_0_Sub_2"))
-            avatar_mesh_indices = np.array(usd_geom_avatar.GetFaceVertexIndicesAttr().Get())
-            avatar_mesh_points = np.array(usd_geom_avatar.GetPointsAttr().Get())
+            usd_prim_avatar = usd_stage.GetPrimAtPath("/Root/Female/Root_SkinnedMesh_Avatar_0_Sub_2")
+            avatar_mesh = newton.usd.get_mesh(usd_prim_avatar)
+            avatar_mesh_indices = avatar_mesh.indices
+            avatar_mesh_points = avatar_mesh.vertices
 
-            builder.add_aniso_cloth_mesh(
+            style3d.add_cloth_mesh(
+                builder,
                 pos=wp.vec3(0, 0, 0),
                 rot=wp.quat_from_axis_angle(axis=wp.vec3(1, 0, 0), angle=wp.pi / 2.0),
                 vel=wp.vec3(0.0, 0.0, 0.0),
-                tri_aniso_ke=wp.vec3(1.0e2, 1.0e2, 1.0e1),
-                edge_aniso_ke=wp.vec3(2.0e-5, 1.0e-5, 5.0e-6),
                 panel_verts=garment_mesh_uv.tolist(),
                 panel_indices=garment_mesh_uv_indices.tolist(),
-                vertices=garment_mesh_points.tolist(),
-                indices=garment_mesh_indices.tolist(),
+                vertices=garment_mesh.vertices.tolist(),
+                indices=garment_mesh.indices.tolist(),
                 density=0.3,
                 scale=1.0,
                 particle_radius=5.0e-3,
+                tri_aniso_ke=wp.vec3(1.0e2, 1.0e2, 1.0e1),
+                edge_aniso_ke=wp.vec3(2.0e-5, 1.0e-5, 5.0e-6),
             )
             builder.add_shape_mesh(
                 body=builder.add_body(),
@@ -92,7 +97,8 @@ class Example:
             grid_dim = 100
             grid_width = 1.0
             cloth_density = 0.3
-            builder.add_aniso_cloth_grid(
+            style3d.add_cloth_grid(
+                builder,
                 pos=wp.vec3(-0.5, 0.0, 2.0),
                 rot=wp.quat_from_axis_angle(axis=wp.vec3(1, 0, 0), angle=wp.pi / 2.0),
                 dim_x=grid_dim,
@@ -124,22 +130,23 @@ class Example:
         self.model.soft_contact_ke = 1.0e1
         self.model.soft_contact_kd = 1.0e-6
         self.model.soft_contact_mu = 0.2
-        self.model.gravity = wp.vec3(0.0, 0.0, -9.81)
+        self.model.set_gravity((0.0, 0.0, -9.81))
 
         self.solver = newton.solvers.SolverStyle3D(
             model=self.model,
             iterations=self.iterations,
-            collision_handler=CollisionHandler(self.model),
         )
-        self.solver.precompute(
+        self.solver._precompute(
             builder,
         )
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+
+        self.contacts = self.model.contacts()
 
         self.viewer.set_model(self.model)
+        self.viewer.set_camera(wp.vec3(0.0, -1.7, 1.4), 0.0, -270.0)
 
         self.capture()
 
@@ -152,7 +159,7 @@ class Example:
             self.graph = None
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0)
+        self.model.collide(self.state_0, self.contacts)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
@@ -170,8 +177,14 @@ class Example:
 
         self.sim_time += self.frame_dt
 
-    def test(self):
-        pass
+    def test_final(self):
+        p_lower = wp.vec3(-0.5, -0.2, 0.9)
+        p_upper = wp.vec3(0.5, 0.2, 1.6)
+        newton.examples.test_particle_state(
+            self.state_0,
+            "particles are within a reasonable volume",
+            lambda q, qd: newton.math.vec_inside_limits(q, p_lower, p_upper),
+        )
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
@@ -185,6 +198,6 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init()
 
     # Create example and run
-    example = Example(viewer)
+    example = Example(viewer, args)
 
-    newton.examples.run(example)
+    newton.examples.run(example, args)

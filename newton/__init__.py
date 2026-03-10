@@ -17,12 +17,14 @@
 # core
 # ==================================================================================
 from ._src.core import (
+    MAXVAL,
     Axis,
     AxisType,
 )
 from ._version import __version__
 
 __all__ = [
+    "MAXVAL",
     "Axis",
     "AxisType",
     "__version__",
@@ -34,6 +36,7 @@ __all__ = [
 from ._src.geometry import (
     SDF,
     GeoType,
+    Heightfield,
     Mesh,
     ParticleFlags,
     ShapeFlags,
@@ -42,6 +45,7 @@ from ._src.geometry import (
 __all__ += [
     "SDF",
     "GeoType",
+    "Heightfield",
     "Mesh",
     "ParticleFlags",
     "ShapeFlags",
@@ -55,15 +59,15 @@ from ._src.sim import (  # noqa: E402
     Contacts,
     Control,
     EqType,
-    JointMode,
+    JointTargetMode,
     JointType,
     Model,
     ModelBuilder,
     State,
-    count_rigid_contact_points,
     eval_fk,
     eval_ik,
-    get_joint_dof_count,
+    eval_jacobian,
+    eval_mass_matrix,
 )
 
 __all__ += [
@@ -71,39 +75,30 @@ __all__ += [
     "Contacts",
     "Control",
     "EqType",
-    "JointMode",
+    "JointTargetMode",
     "JointType",
     "Model",
     "ModelBuilder",
     "State",
-    "count_rigid_contact_points",
     "eval_fk",
     "eval_ik",
-    "get_joint_dof_count",
-]
-
-# ==================================================================================
-# Style3D helpers
-# TODO: eliminate these and roll the functionality into Model and ModelBuilder?
-# ==================================================================================
-from ._src.sim.style3d import Style3DModel, Style3DModelBuilder  # noqa: E402
-
-__all__ += [
-    "Style3DModel",
-    "Style3DModelBuilder",
+    "eval_jacobian",
+    "eval_mass_matrix",
 ]
 
 # ==================================================================================
 # submodule APIs
 # ==================================================================================
-from . import geometry, ik, selection, sensors, solvers, utils, viewer  # noqa: E402
+from . import geometry, ik, math, selection, sensors, solvers, usd, utils, viewer  # noqa: E402
 
 __all__ += [
     "geometry",
     "ik",
+    "math",
     "selection",
     "sensors",
     "solvers",
+    "usd",
     "utils",
     "viewer",
 ]

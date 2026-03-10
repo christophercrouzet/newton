@@ -35,6 +35,10 @@ class Example:
         # save a reference to the viewer
         self.viewer = viewer
         builder = newton.ModelBuilder()
+
+        # Register MPM custom attributes before adding particles
+        SolverImplicitMPM.register_custom_attributes(builder)
+
         sand_particles, snow_particles, mud_particles = Example.emit_particles(builder, voxel_size=options.voxel_size)
 
         builder.add_ground_plane()
@@ -44,41 +48,31 @@ class Example:
         snow_particles = wp.array(snow_particles, dtype=int, device=self.model.device)
         mud_particles = wp.array(mud_particles, dtype=int, device=self.model.device)
 
-        self.model.particle_ke = 1.0e15  # non-compliant particles
-        self.model.particle_kd = 0.0
-        self.model.particle_mu = 0.5
+        # Multi-material setup via model.mpm.* custom attributes
+        # Snow: soft, compressible, low friction
+        self.model.mpm.yield_pressure[snow_particles].fill_(2.0e4)
+        self.model.mpm.yield_stress[snow_particles].fill_(1.0e3)
+        self.model.mpm.tensile_yield_ratio[snow_particles].fill_(0.05)
+        self.model.mpm.friction[snow_particles].fill_(0.1)
+        self.model.mpm.hardening[snow_particles].fill_(10.0)
 
-        mpm_options = SolverImplicitMPM.Options()
+        # Mud: viscous, cohesive
+        self.model.mpm.yield_pressure[mud_particles].fill_(1.0e10)
+        self.model.mpm.yield_stress[mud_particles].fill_(3.0e2)
+        self.model.mpm.tensile_yield_ratio[mud_particles].fill_(1.0)
+        self.model.mpm.hardening[mud_particles].fill_(2.0)
+        self.model.mpm.friction[mud_particles].fill_(0.0)
+
+        mpm_options = SolverImplicitMPM.Config()
         mpm_options.voxel_size = options.voxel_size
         mpm_options.tolerance = options.tolerance
         mpm_options.max_iterations = options.max_iterations
 
-        # Create MPM model from Newton model
-        mpm_model = SolverImplicitMPM.Model(self.model, mpm_options)
-
-        # multi-material setup
-        # some properties like elastic stiffness, damping, can be adjusted directly on the model,
-        # but not all yet. here we directly adjust the MPM model's material parameters
-
-        mpm_model.material_parameters.yield_pressure[snow_particles].fill_(2.0e4)
-        mpm_model.material_parameters.yield_stress[snow_particles].fill_(1.0e3)
-        mpm_model.material_parameters.tensile_yield_ratio[snow_particles].fill_(0.05)
-        mpm_model.material_parameters.friction[snow_particles].fill_(0.1)
-        mpm_model.material_parameters.hardening[snow_particles].fill_(10.0)
-
-        mpm_model.material_parameters.yield_pressure[mud_particles].fill_(1.0e10)
-        mpm_model.material_parameters.yield_stress[mud_particles].fill_(3.0e2)
-        mpm_model.material_parameters.tensile_yield_ratio[mud_particles].fill_(1.0)
-        mpm_model.material_parameters.hardening[mud_particles].fill_(2.0)
-        mpm_model.material_parameters.friction[mud_particles].fill_(0.0)
-
-        mpm_model.notify_particle_material_changed()
-
-        self.state_0 = mpm_model.state()
-        self.state_1 = mpm_model.state()
-
         # Initialize MPM solver
-        self.solver = SolverImplicitMPM(mpm_model, mpm_options)
+        self.solver = SolverImplicitMPM(self.model, mpm_options)
+
+        self.state_0 = self.model.state()
+        self.state_1 = self.model.state()
 
         # Assign different colors to each particle type
         self.particle_colors = wp.full(
@@ -94,15 +88,19 @@ class Example:
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.solver.step(self.state_0, self.state_1, None, None, self.sim_dt)
-            self.solver.project_outside(self.state_1, self.state_1, self.sim_dt)
+            self.solver._project_outside(self.state_1, self.state_1, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
         self.simulate()
         self.sim_time += self.frame_dt
 
-    def test(self):
-        pass
+    def test_final(self):
+        newton.examples.test_particle_state(
+            self.state_0,
+            "all particles are above the ground",
+            lambda q, qd: q[2] > -0.05,
+        )
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
@@ -167,39 +165,30 @@ class Example:
             dtype=int,
         )
 
-        px = np.linspace(bounds_lo[0], bounds_hi[0], res[0] + 1)
-        py = np.linspace(bounds_lo[1], bounds_hi[1], res[1] + 1)
-        pz = np.linspace(bounds_lo[2], bounds_hi[2], res[2] + 1)
-
-        points = np.stack(np.meshgrid(px, py, pz)).reshape(3, -1).T
-
         cell_size = (bounds_hi - bounds_lo) / res
         cell_volume = np.prod(cell_size)
-
         radius = np.max(cell_size) * 0.5
         mass = np.prod(cell_volume) * density
 
-        rng = np.random.default_rng(42)
-        points += 2.0 * radius * (rng.random(points.shape) - 0.5)
-        vel = np.zeros_like(points)
+        begin_id = len(builder.particle_q)
+        builder.add_particle_grid(
+            pos=wp.vec3(bounds_lo),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0),
+            dim_x=res[0] + 1,
+            dim_y=res[1] + 1,
+            dim_z=res[2] + 1,
+            cell_x=cell_size[0],
+            cell_y=cell_size[1],
+            cell_z=cell_size[2],
+            mass=mass,
+            jitter=2.0 * radius,
+            radius_mean=radius,
+            flags=flags,
+        )
 
-        first_id = len(builder.particle_q)
-        if first_id == 0:
-            builder.particle_q = points
-            builder.particle_qd = vel
-            builder.particle_mass = np.full(points.shape[0], mass)
-            builder.particle_radius = np.full(points.shape[0], radius)
-            builder.particle_flags = np.full(points.shape[0], flags, dtype=int)
-        else:
-            builder.particle_q = np.concatenate([builder.particle_q, points])
-            builder.particle_qd = np.concatenate([builder.particle_qd, vel])
-            builder.particle_mass = np.concatenate([builder.particle_mass, np.full(points.shape[0], mass)])
-            builder.particle_radius = np.concatenate([builder.particle_radius, np.full(points.shape[0], radius)])
-            builder.particle_flags = np.concatenate(
-                [builder.particle_flags, np.full(points.shape[0], flags, dtype=int)]
-            )
-
-        return np.arange(first_id, first_id + points.shape[0], dtype=int)
+        end_id = len(builder.particle_q)
+        return np.arange(begin_id, end_id, dtype=int)
 
 
 if __name__ == "__main__":
@@ -216,4 +205,4 @@ if __name__ == "__main__":
     # Create example and run
     example = Example(viewer, args)
 
-    newton.examples.run(example)
+    newton.examples.run(example, args)

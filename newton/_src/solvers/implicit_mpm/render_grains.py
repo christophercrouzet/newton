@@ -170,7 +170,7 @@ def update_render_grains(
      1) a particle-local affine update using the particle velocity gradient and
         particle positions (APIC-like), and 2) a grid-based PIC advection using
         the current velocity field. After advection, positions are projected
-        back using an ellipsoidal appoximation of the particle defined by its
+        back using an ellipsoidal approximation of the particle defined by its
         deformation frame and ``particle_radius``.
 
     If no velocity field is available in the ``state`` the function
@@ -197,7 +197,7 @@ def update_render_grains(
             dt,
             state_prev.particle_q,
             state.particle_q,
-            state.particle_qd_grad,
+            state.mpm.particle_qd_grad,
             grains,
         ],
         device=grains.device,
@@ -222,7 +222,7 @@ def update_render_grains(
         inputs=[
             particle_radius,
             state.particle_q,
-            state.particle_transform,
+            state.mpm.particle_transform,
             grains,
         ],
         device=grains.device,

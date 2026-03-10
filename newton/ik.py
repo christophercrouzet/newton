@@ -14,19 +14,27 @@
 # limitations under the License.
 
 from ._src.sim.ik import (
-    IKJacobianMode,
-    IKJointLimitObjective,
+    IKJacobianType,
     IKObjective,
-    IKPositionObjective,
-    IKRotationObjective,
+    IKObjectiveJointLimit,
+    IKObjectivePosition,
+    IKObjectiveRotation,
+    IKOptimizer,
+    IKOptimizerLBFGS,
+    IKOptimizerLM,
+    IKSampler,
     IKSolver,
 )
 
 __all__ = [
-    "IKJacobianMode",
-    "IKJointLimitObjective",
+    "IKJacobianType",
     "IKObjective",
-    "IKPositionObjective",
-    "IKRotationObjective",
+    "IKObjectiveJointLimit",
+    "IKObjectivePosition",
+    "IKObjectiveRotation",
+    "IKOptimizer",
+    "IKOptimizerLBFGS",
+    "IKOptimizerLM",
+    "IKSampler",
     "IKSolver",
 ]

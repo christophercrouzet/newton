@@ -14,7 +14,7 @@
 # limitations under the License.
 
 ###########################################################################
-# Example Sim Grad Bounce
+# Example Diffsim Ball
 #
 # Shows how to use Newton to optimize the initial velocity of a particle
 # such that it bounces off the wall and floor in order to hit a target.
@@ -26,10 +26,13 @@
 # Command: python -m newton.examples diffsim_ball
 #
 ###########################################################################
+import numpy as np
 import warp as wp
 
 import newton
 import newton.examples
+from newton.tests.unittest_utils import assert_np_equal
+from newton.utils import bourke_color_map
 
 
 @wp.kernel
@@ -48,7 +51,7 @@ def step_kernel(x: wp.array(dtype=wp.vec3), grad: wp.array(dtype=wp.vec3), alpha
 
 
 class Example:
-    def __init__(self, viewer, verbose=False):
+    def __init__(self, viewer, args=None, verbose=False):
         # setup simulation parameters first
         self.fps = 60
         self.frame = 0
@@ -63,6 +66,7 @@ class Example:
         self.train_rate = 0.02
         self.target = (0.0, -2.0, 1.5)
         self.loss = wp.zeros(1, dtype=wp.float32, requires_grad=True)
+        self.loss_history = []
 
         self.viewer = viewer
         self.viewer.show_particles = True
@@ -104,7 +108,16 @@ class Example:
         # allocate sim states, initialize control and one-shot contacts (valid for simple collisions against constant plane)
         self.states = [self.model.state() for _ in range(self.sim_steps * self.sim_substeps + 1)]
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.states[0], soft_contact_margin=10.0)
+
+        # Create collision pipeline (requires_grad for differentiable simulation)
+        self.collision_pipeline = newton.CollisionPipeline(
+            self.model,
+            broad_phase="explicit",
+            soft_contact_margin=10.0,
+            requires_grad=True,
+        )
+        self.contacts = self.collision_pipeline.contacts()
+        self.collision_pipeline.collide(self.states[0], self.contacts)
 
         self.viewer.set_model(self.model)
 
@@ -160,9 +173,14 @@ class Example:
         self.tape.zero()
 
         self.train_iter += 1
+        self.loss_history.append(self.loss.numpy()[0])
 
-    def test(self):
-        pass
+    def test_final(self):
+        x_grad_numeric, x_grad_analytic = self.check_grad()
+        assert_np_equal(x_grad_numeric, x_grad_analytic, tol=5e-2)
+        assert all(np.array(self.loss_history) < 10.0)
+        # skip the last loss because there could be some bouncing around the optimum
+        assert all(np.diff(self.loss_history[:-1]) < -1e-3)
 
     def render(self):
         if self.frame > 0 and self.train_iter % 16 != 0:
@@ -176,6 +194,7 @@ class Example:
             traj_verts.append(state.particle_q.numpy()[0].tolist())
 
             self.viewer.begin_frame(self.frame * self.frame_dt)
+            self.viewer.log_scalar("/loss", self.loss.numpy()[0])
             self.viewer.log_state(state)
             self.viewer.log_contacts(self.contacts, state)
             self.viewer.log_shapes(
@@ -189,15 +208,13 @@ class Example:
                 f"/traj_{self.train_iter - 1}",
                 wp.array(traj_verts[0:-1], dtype=wp.vec3),
                 wp.array(traj_verts[1:], dtype=wp.vec3),
-                wp.render.bourke_color_map(0.0, 7.0, self.loss.numpy()[0]),
+                bourke_color_map(0.0, 7.0, self.loss.numpy()[0]),
             )
             self.viewer.end_frame()
 
             self.frame += 1
 
     def check_grad(self):
-        import numpy as np  # noqa: PLC0415
-
         param = self.states[0].particle_qd
 
         # initial value
@@ -235,12 +252,14 @@ class Example:
 
         tape.backward(l)
 
-        x_grad_analytic = tape.gradients[param]
+        x_grad_analytic = param.grad.numpy()[0].copy()
 
         print(f"numeric grad: {x_grad_numeric}")
         print(f"analytic grad: {x_grad_analytic}")
 
         tape.zero()
+
+        return x_grad_numeric, x_grad_analytic
 
 
 if __name__ == "__main__":
@@ -252,10 +271,10 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init(parser)
 
     # Create example
-    example = Example(viewer, verbose=args.verbose)
+    example = Example(viewer, args=args, verbose=args.verbose)
 
     # Check gradients
     example.check_grad()
 
     # Run example
-    newton.examples.run(example)
+    newton.examples.run(example, args)

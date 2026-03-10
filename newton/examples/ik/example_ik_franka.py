@@ -17,7 +17,7 @@
 # Example IK Franka (positions + rotations)
 #
 # Inverse kinematics on a Franka FR3 arm targeting the TCP (fr3_hand_tcp).
-# - Single IKPositionObjective + IKRotationObjective
+# - Single IKObjectivePosition + IKObjectiveRotation
 # - Gizmo controls the TCP target (with ViewerGL.log_gizmo)
 #
 # Command: python -m newton.examples ik_franka
@@ -70,42 +70,27 @@ class Example:
         # ------------------------------------------------------------------
         # IK setup (single problem, single EE)
         # ------------------------------------------------------------------
-        # residual layout:
-        # [0..2]  : position (3)
-        # [3..5]  : rotation (3)
-        # [6..]   : joint limits (joint_coord_count)
-        total_residuals = 6 + self.model.joint_coord_count
-
         def _q2v4(q):
             return wp.vec4(q[0], q[1], q[2], q[3])
 
         # Position objective
-        self.pos_obj = ik.IKPositionObjective(
+        self.pos_obj = ik.IKObjectivePosition(
             link_index=self.ee_index,
             link_offset=wp.vec3(0.0, 0.0, 0.0),
             target_positions=wp.array([wp.transform_get_translation(self.ee_tf)], dtype=wp.vec3),
-            n_problems=1,
-            total_residuals=total_residuals,
-            residual_offset=0,
         )
 
         # Rotation objective
-        self.rot_obj = ik.IKRotationObjective(
+        self.rot_obj = ik.IKObjectiveRotation(
             link_index=self.ee_index,
             link_offset_rotation=wp.quat_identity(),
             target_rotations=wp.array([_q2v4(wp.transform_get_rotation(self.ee_tf))], dtype=wp.vec4),
-            n_problems=1,
-            total_residuals=total_residuals,
-            residual_offset=3,
         )
 
         # Joint limit objective
-        self.obj_joint_limits = ik.IKJointLimitObjective(
+        self.obj_joint_limits = ik.IKObjectiveJointLimit(
             joint_limit_lower=self.model.joint_limit_lower,
             joint_limit_upper=self.model.joint_limit_upper,
-            n_problems=1,
-            total_residuals=total_residuals,
-            residual_offset=6,
             weight=10.0,
         )
 
@@ -115,10 +100,10 @@ class Example:
         self.ik_iters = 24
         self.solver = ik.IKSolver(
             model=self.model,
-            joint_q=self.joint_q,
+            n_problems=1,
             objectives=[self.pos_obj, self.rot_obj, self.obj_joint_limits],
             lambda_initial=0.1,
-            jacobian_mode=ik.IKJacobianMode.ANALYTIC,
+            jacobian_mode=ik.IKJacobianType.ANALYTIC,
         )
 
         self.capture()
@@ -134,7 +119,8 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.solver.solve(iterations=self.ik_iters)
+        self.solver.step(self.joint_q, self.joint_q, iterations=self.ik_iters)
+        wp.copy(self.model.joint_q, self.joint_q)
 
     def _push_targets_from_gizmos(self):
         """Read gizmo-updated transform and push into IK objectives."""
@@ -153,7 +139,7 @@ class Example:
             self.simulate()
         self.sim_time += self.frame_dt
 
-    def test(self):
+    def test_final(self):
         pass
 
     def render(self):
@@ -174,4 +160,4 @@ if __name__ == "__main__":
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init()
     example = Example(viewer)
-    newton.examples.run(example)
+    newton.examples.run(example, args)

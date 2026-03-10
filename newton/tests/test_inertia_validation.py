@@ -50,7 +50,7 @@ class TestInertiaValidation(unittest.TestCase):
         inertia = wp.mat33([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
 
         with warnings.catch_warnings(record=True) as w:
-            corrected_mass, corrected_inertia, was_corrected = verify_and_correct_inertia(
+            corrected_mass, _corrected_inertia, was_corrected = verify_and_correct_inertia(
                 mass, inertia, bound_mass=bound_mass
             )
 
@@ -170,8 +170,8 @@ class TestInertiaValidation(unittest.TestCase):
         invalid_inertia = wp.mat33([[0.001, 0.0, 0.0], [0.0, 0.001, 0.0], [0.0, 0.0, 1.0]])
         body_idx = builder.add_body(
             mass=0.05,  # Below bound
-            I_m=invalid_inertia,  # Violates triangle inequality
-            key="test_body",
+            inertia=invalid_inertia,  # Violates triangle inequality
+            label="test_body",
         )
 
         with warnings.catch_warnings(record=True) as w:
@@ -205,8 +205,8 @@ class TestInertiaValidation(unittest.TestCase):
         invalid_inertia = wp.mat33([[0.001, 0.0, 0.0], [0.0, 0.001, 0.0], [0.0, 0.0, 1.0]])
         body_idx = builder.add_body(
             mass=0.05,  # Below bound
-            I_m=invalid_inertia,  # Violates triangle inequality
-            key="test_body",
+            inertia=invalid_inertia,  # Violates triangle inequality
+            label="test_body",
         )
 
         with warnings.catch_warnings(record=True) as w:
@@ -243,7 +243,7 @@ class TestInertiaValidation(unittest.TestCase):
         # Add a body with negative mass
         body_idx = builder.add_body(
             mass=-1.0,  # Negative mass - critical issue
-            key="test_body",
+            label="test_body",
         )
 
         with warnings.catch_warnings(record=True) as w:
@@ -259,4 +259,4 @@ class TestInertiaValidation(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)

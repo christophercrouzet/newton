@@ -35,25 +35,22 @@ class Example:
         # save a reference to the viewer
         self.viewer = viewer
         builder = newton.ModelBuilder()
+
+        # Register MPM custom attributes before adding particles
+        SolverImplicitMPM.register_custom_attributes(builder)
+
         Example.emit_particles(builder, options)
         builder.add_ground_plane()
-
         self.model = builder.finalize()
-        self.model.particle_mu = 0.5
-        self.model.particle_ke = 1.0e12
-        self.model.particle_kd = 0.0
 
-        mpm_options = SolverImplicitMPM.Options()
+        mpm_options = SolverImplicitMPM.Config()
         mpm_options.voxel_size = options.voxel_size
-        mpm_options.points_per_particle = options.points_per_particle
-        # Create MPM model from Newton model
-        mpm_model = SolverImplicitMPM.Model(self.model, mpm_options)
 
-        self.state_0 = mpm_model.state()
-        self.state_1 = mpm_model.state()
+        # Initialize MPM solver
+        self.solver = SolverImplicitMPM(self.model, mpm_options)
 
-        # Initialize MPM solver and add supplemental state variables
-        self.solver = SolverImplicitMPM(mpm_model, mpm_options)
+        self.state_0 = self.model.state()
+        self.state_1 = self.model.state()
 
         # Setup grain rendering
 
@@ -71,11 +68,11 @@ class Example:
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.solver.step(self.state_0, self.state_1, None, None, self.sim_dt)
-            self.solver.project_outside(self.state_1, self.state_1, self.sim_dt)
+            self.solver._project_outside(self.state_1, self.state_1, self.sim_dt)
 
             # update grains
-            self.solver.update_particle_frames(self.state_0, self.state_1, self.sim_dt)
-            self.solver.update_render_grains(self.state_0, self.state_1, self.grains, self.sim_dt)
+            self.solver._update_particle_frames(self.state_0, self.state_1, self.sim_dt)
+            self.solver._update_render_grains(self.state_0, self.state_1, self.grains, self.sim_dt)
 
             self.state_0, self.state_1 = self.state_1, self.state_0
 
@@ -83,8 +80,12 @@ class Example:
         self.simulate()
         self.sim_time += self.frame_dt
 
-    def test(self):
-        pass
+    def test_final(self):
+        newton.examples.test_particle_state(
+            self.state_0,
+            "all particles are above the ground",
+            lambda q, qd: q[2] > -0.05,
+        )
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
@@ -116,32 +117,25 @@ class Example:
         bounds_hi,
         density,
     ):
-        Nx = res[0]
-        Ny = res[1]
-        Nz = res[2]
-
-        px = np.linspace(bounds_lo[0], bounds_hi[0], Nx + 1)
-        py = np.linspace(bounds_lo[1], bounds_hi[1], Ny + 1)
-        pz = np.linspace(bounds_lo[2], bounds_hi[2], Nz + 1)
-
-        points = np.stack(np.meshgrid(px, py, pz)).reshape(3, -1).T
-
         cell_size = (bounds_hi - bounds_lo) / res
         cell_volume = np.prod(cell_size)
-
         radius = np.max(cell_size) * 0.5
         mass = np.prod(cell_volume) * density
 
-        rng = np.random.default_rng(42)
-        points += 2.0 * radius * (rng.random(points.shape) - 0.5)
-        vel = np.zeros_like(points)
-
-        builder.particle_q = points
-        builder.particle_qd = vel
-        builder.particle_mass = np.full(points.shape[0], mass)
-        builder.particle_radius = np.full(points.shape[0], radius)
-
-        builder.particle_flags = np.ones(points.shape[0], dtype=int)
+        builder.add_particle_grid(
+            pos=wp.vec3(bounds_lo),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0),
+            dim_x=res[0] + 1,
+            dim_y=res[1] + 1,
+            dim_z=res[2] + 1,
+            cell_x=cell_size[0],
+            cell_y=cell_size[1],
+            cell_z=cell_size[2],
+            mass=mass,
+            jitter=2.0 * radius,
+            radius_mean=radius,
+        )
 
 
 if __name__ == "__main__":
@@ -157,4 +151,4 @@ if __name__ == "__main__":
     # Create example and run
     example = Example(viewer, args)
 
-    newton.examples.run(example)
+    newton.examples.run(example, args)

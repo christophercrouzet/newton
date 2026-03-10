@@ -13,16 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ._src.utils.recorder_gui import RecorderImGuiManager
-
 # Import all viewer classes (they handle missing dependencies at instantiation time)
-from ._src.viewer import ViewerFile, ViewerGL, ViewerNull, ViewerRerun, ViewerUSD
+from ._src.viewer import ViewerFile, ViewerGL, ViewerNull, ViewerRerun, ViewerUSD, ViewerViser
 
 __all__ = [
-    "RecorderImGuiManager",
     "ViewerFile",
     "ViewerGL",
     "ViewerNull",
     "ViewerRerun",
     "ViewerUSD",
+    "ViewerViser",
 ]

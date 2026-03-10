@@ -1,3 +1,6 @@
+.. SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+.. SPDX-License-Identifier: CC-BY-4.0
+
 ``warp.sim`` Migration Guide
 ============================
 
@@ -75,6 +78,14 @@ The ``Model.joint_axis`` attribute has been removed since it now equals :attr:`n
 +------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+
 | ``Model.shape_materials.ke``, ``Model.shape_materials.kd``, etc. | :attr:`Model.shape_material_ke`, :attr:`Model.shape_material_kd`, etc.                                                |
 +------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+
+| ``Model.rigid_contact_torsional_friction``                       | :attr:`Model.shape_material_torsional_friction` (now per-shape array)                                                 |
+|                                                                  |                                                                                                                       |
+|                                                                  | Note: these coefficients are now interpreted as absolute values rather than being scaled by the friction coefficient. |
++------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+
+| ``Model.rigid_contact_rolling_friction``                         | :attr:`Model.shape_material_rolling_friction` (now per-shape array)                                                   |
+|                                                                  |                                                                                                                       |
+|                                                                  | Note: these coefficients are now interpreted as absolute values rather than being scaled by the friction coefficient. |
++------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+
 
 Forward and Inverse Kinematics
 ------------------------------
@@ -95,7 +106,7 @@ The signatures of the :func:`newton.eval_fk` and :func:`newton.eval_ik` function
 The :class:`newton.Control` class now has a :attr:`newton.Control.joint_f` attribute which encodes the generalized force (torque) input to the joints.
 In order to match the MuJoCo convention, :attr:`~newton.Control.joint_f` now includes the dofs of the free joints as well, so its dimension is :attr:`newton.Model.joint_dof_count`.
 The control mode ``JOINT_MODE_FORCE`` has been removed, since it is now realized by setting :attr:`Control.joint_f` instead of ``joint_act``.
-To disable joint target control for a dof, use ``JointMode.NONE``.
+``JointMode`` has been removed and it is now possible to set both joint target position and velocity simultaneously using the :attr:`newton.Control.joint_target_pos` and :attr:`newton.Control.joint_target_vel` attributes.
 
 The :class:`newton.Control` class now has a :attr:`newton.Control.joint_target` attribute (in place of the previous ``joint_act`` attribute) that encodes either the position or the velocity target for the control,
 depending on the control mode selected for the joint dof.
@@ -147,6 +158,21 @@ per-joint compliance settings and have decided to remove this feature for memory
 The :meth:`newton.ModelBuilder.add_joint_free()` method now initializes the positional dofs of the free joint with the child body's transform (``body_q``).
 
 The universal and compound joints have been removed in favor of the more general D6 joint.
+
+
+Collisions
+----------
+
++-----------------------------------------------+--------------------------------------------------------------+
+| **warp.sim**                                  | **Newton**                                                   |
++-----------------------------------------------+--------------------------------------------------------------+
+| ``contacts = model.collide(state)``           | ``contacts = model.contacts()``                              |
+|                                               |                                                              |
+|                                               | ``model.collide(state, contacts)``                           |
++-----------------------------------------------+--------------------------------------------------------------+
+
+:meth:`~newton.Model.contacts` allocates the contacts buffer and :meth:`~newton.Model.collide` populates it in place.
+The buffer can be reused across steps. For more control, create a :class:`~newton.CollisionPipeline` directly.
 
 
 Renderers

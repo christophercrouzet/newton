@@ -19,7 +19,7 @@
 # Shows how to set up a simulation of a H1 articulation
 # from a USD file using newton.ModelBuilder.add_usd().
 #
-# Command: python -m newton.examples robot_h1 --num-envs 16
+# Command: python -m newton.examples robot_h1 --world-count 16
 #
 ###########################################################################
 
@@ -28,10 +28,11 @@ import warp as wp
 import newton
 import newton.examples
 import newton.utils
+from newton import JointTargetMode
 
 
 class Example:
-    def __init__(self, viewer, num_envs=4):
+    def __init__(self, viewer, world_count=4, args=None):
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
 
@@ -39,51 +40,63 @@ class Example:
         self.sim_substeps = 4
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.num_envs = num_envs
+        self.world_count = world_count
 
         self.viewer = viewer
 
         self.device = wp.get_device()
 
         h1 = newton.ModelBuilder()
+        newton.solvers.SolverMuJoCo.register_custom_attributes(h1)
         h1.default_joint_cfg = newton.ModelBuilder.JointDofConfig(limit_ke=1.0e3, limit_kd=1.0e1, friction=1e-5)
-        h1.default_shape_cfg.ke = 5.0e4
-        h1.default_shape_cfg.kd = 5.0e2
+        h1.default_shape_cfg.ke = 2.0e3
+        h1.default_shape_cfg.kd = 1.0e2
         h1.default_shape_cfg.kf = 1.0e3
         h1.default_shape_cfg.mu = 0.75
 
         asset_path = newton.utils.download_asset("unitree_h1")
-        asset_file = str(asset_path / "usd" / "h1_minimal.usda")
+        asset_file = str(asset_path / "usd_structured" / "h1.usda")
         h1.add_usd(
             asset_file,
             ignore_paths=["/GroundPlane"],
-            collapse_fixed_joints=False,
             enable_self_collisions=False,
-            load_non_physics_prims=True,
-            hide_collision_shapes=True,
         )
         # approximate meshes for faster collision detection
         h1.approximate_meshes("bounding_box")
 
-        for i in range(len(h1.joint_dof_mode)):
-            h1.joint_dof_mode[i] = newton.JointMode.TARGET_POSITION
+        for i in range(len(h1.joint_target_ke)):
             h1.joint_target_ke[i] = 150
             h1.joint_target_kd[i] = 5
+            h1.joint_target_mode[i] = int(JointTargetMode.POSITION)
 
         builder = newton.ModelBuilder()
-        builder.replicate(h1, self.num_envs, spacing=(3, 3, 0))
+        builder.replicate(h1, self.world_count)
 
+        builder.default_shape_cfg.ke = 1.0e3
+        builder.default_shape_cfg.kd = 1.0e2
         builder.add_ground_plane()
 
         self.model = builder.finalize()
-        self.solver = newton.solvers.SolverMuJoCo(self.model, iterations=100, ls_iterations=50, njmax=100)
+        self.solver = newton.solvers.SolverMuJoCo(
+            self.model,
+            iterations=100,
+            ls_iterations=50,
+            njmax=100,
+            nconmax=210,
+            use_mujoco_contacts=args.use_mujoco_contacts if args else False,
+        )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+
+        # Evaluate forward kinematics for collision detection
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+
+        self.contacts = self.model.contacts()
 
         self.viewer.set_model(self.model)
+        self.viewer.set_world_offsets((3.0, 3.0, 0.0))
 
         self.capture()
 
@@ -95,7 +108,7 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0)
+        self.model.collide(self.state_0, self.contacts)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
@@ -121,16 +134,27 @@ class Example:
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
-    def test(self):
-        pass
+    def test_final(self):
+        newton.examples.test_body_state(
+            self.model,
+            self.state_0,
+            "all bodies are above the ground",
+            lambda q, qd: q[2] > 0.0,
+        )
+        newton.examples.test_body_state(
+            self.model,
+            self.state_0,
+            "all body velocities are small",
+            lambda q, qd: max(abs(qd)) < 5e-3,
+        )
 
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
-    parser.add_argument("--num-envs", type=int, default=4, help="Total number of simulated environments.")
+    parser.add_argument("--world-count", type=int, default=4, help="Total number of simulated worlds.")
 
     viewer, args = newton.examples.init(parser)
 
-    example = Example(viewer, args.num_envs)
+    example = Example(viewer, args.world_count, args)
 
-    newton.examples.run(example)
+    newton.examples.run(example, args)

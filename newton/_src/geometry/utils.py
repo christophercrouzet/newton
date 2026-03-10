@@ -23,15 +23,66 @@ import numpy as np
 import warp as wp
 
 from ..core.types import Vec3, nparray
-from .inertia import compute_mesh_inertia
+from .inertia import compute_inertia_mesh
 from .types import (
-    SDF,
     GeoType,
+    Heightfield,
     Mesh,
 )
 
 
-def compute_shape_radius(geo_type: int, scale: Vec3, src: Mesh | SDF | None) -> float:
+# Warp kernel for inertia-based OBB computation
+@wp.kernel(enable_backward=False)
+def compute_obb_candidates(
+    vertices: wp.array(dtype=wp.vec3),
+    base_quat: wp.quat,
+    volumes: wp.array2d(dtype=float),
+    transforms: wp.array2d(dtype=wp.transform),
+    extents: wp.array2d(dtype=wp.vec3),
+):
+    """Compute OBB candidates for different rotations around principal axes."""
+    angle_idx, axis_idx = wp.tid()
+    num_angles_per_axis = volumes.shape[0]
+
+    # Compute rotation angle around one of the principal axes (X=0, Y=1, Z=2)
+    angle = float(angle_idx) * (2.0 * wp.pi) / float(num_angles_per_axis)
+
+    # Select the standard basis vector for the current axis
+    local_axis = wp.vec3(0.0, 0.0, 0.0)
+    local_axis[axis_idx] = 1.0
+
+    # Create incremental rotation around principal axis
+    incremental_quat = wp.quat_from_axis_angle(local_axis, angle)
+
+    # Compose rotations: first rotate into principal frame, then apply incremental rotation
+    quat = base_quat * incremental_quat
+
+    # Initialize bounds
+    min_bounds = wp.vec3(1e10, 1e10, 1e10)
+    max_bounds = wp.vec3(-1e10, -1e10, -1e10)
+
+    # Compute bounds for all vertices
+    num_verts = vertices.shape[0]
+    for i in range(num_verts):
+        rotated = wp.quat_rotate(quat, vertices[i])
+        min_bounds = wp.min(min_bounds, rotated)
+        max_bounds = wp.max(max_bounds, rotated)
+
+    # Compute extents and volume
+    box_extents = (max_bounds - min_bounds) * 0.5
+    volume = box_extents[0] * box_extents[1] * box_extents[2]
+
+    # Compute center in rotated space and transform back
+    center = (max_bounds + min_bounds) * 0.5
+    world_center = wp.quat_rotate_inv(quat, center)
+
+    # Store results
+    volumes[angle_idx, axis_idx] = volume
+    extents[angle_idx, axis_idx] = box_extents
+    transforms[angle_idx, axis_idx] = wp.transform(world_center, wp.quat_inverse(quat))
+
+
+def compute_shape_radius(geo_type: int, scale: Vec3, src: Mesh | Heightfield | None) -> float:
     """
     Calculates the radius of a sphere that encloses the shape, used for broadphase collision detection.
     """
@@ -41,7 +92,10 @@ def compute_shape_radius(geo_type: int, scale: Vec3, src: Mesh | SDF | None) -> 
         return np.linalg.norm(scale)
     elif geo_type == GeoType.CAPSULE or geo_type == GeoType.CYLINDER or geo_type == GeoType.CONE:
         return scale[0] + scale[1]
-    elif geo_type == GeoType.MESH:
+    elif geo_type == GeoType.ELLIPSOID:
+        # Bounding sphere radius is the largest semi-axis
+        return max(scale[0], scale[1], scale[2])
+    elif geo_type == GeoType.MESH or geo_type == GeoType.CONVEX_MESH:
         vmax = np.max(np.abs(src.vertices), axis=0) * np.max(scale)
         return np.linalg.norm(vmax)
     elif geo_type == GeoType.PLANE:
@@ -50,6 +104,16 @@ def compute_shape_radius(geo_type: int, scale: Vec3, src: Mesh | SDF | None) -> 
             return np.linalg.norm(scale)
         else:
             return 1.0e6
+    elif geo_type == GeoType.HFIELD:
+        # Heightfield bounding sphere — hx/hy are already half-extents
+        if src is not None:
+            half_x = src.hx * scale[0]
+            half_y = src.hy * scale[1]
+            # Vertical range: from min_z to max_z, centered at midpoint
+            half_z = (src.max_z - src.min_z) / 2.0 * scale[2]
+            return np.sqrt(half_x**2 + half_y**2 + half_z**2)
+        else:
+            return np.linalg.norm(scale)
     else:
         return 10.0
 
@@ -61,7 +125,7 @@ def compute_aabb(vertices: nparray) -> tuple[Vec3, Vec3]:
     return min_coords, max_coords
 
 
-def compute_obb(vertices: nparray) -> tuple[wp.transform, wp.vec3]:
+def compute_pca_obb(vertices: nparray) -> tuple[wp.transform, wp.vec3]:
     """Compute the oriented bounding box of a set of vertices.
 
     Args:
@@ -131,6 +195,97 @@ def compute_obb(vertices: nparray) -> tuple[wp.transform, wp.vec3]:
     return wp.transform(wp.vec3(center), orientation), wp.vec3(extents)
 
 
+def compute_inertia_obb(
+    vertices: nparray,
+    num_angle_steps: int = 360,
+) -> tuple[wp.transform, wp.vec3]:
+    """
+    Compute oriented bounding box using inertia-based principal axes.
+
+    This method provides more stable results than PCA for symmetric objects:
+    1. Computes convex hull of the input vertices
+    2. Computes inertia tensor of the hull and extracts principal axes
+    3. Uses Warp kernels to test rotations around each principal axis
+    4. Returns the OBB with minimum volume
+
+    Args:
+        vertices: Array of shape (N, 3) containing the vertex positions
+        num_angle_steps: Number of angle steps to test per axis (default: 360)
+
+    Returns:
+        Tuple of (transform, extents)
+    """
+    if len(vertices) == 0:
+        return wp.transform_identity(), wp.vec3(0.0, 0.0, 0.0)
+
+    if len(vertices) == 1:
+        return wp.transform(wp.vec3(vertices[0]), wp.quat_identity()), wp.vec3(0.0, 0.0, 0.0)
+
+    # Step 1: Compute convex hull
+    hull_vertices, hull_faces = remesh_convex_hull(vertices, maxhullvert=0)  # 0 = no limit
+    hull_indices = hull_faces.flatten()
+
+    # Step 2: Compute mesh inertia
+    _mass, com, inertia_tensor, _volume = compute_inertia_mesh(
+        density=1.0,  # Unit density
+        vertices=hull_vertices.tolist(),
+        indices=hull_indices.tolist(),
+        is_solid=True,
+    )
+
+    # Adjust vertices to be centered at COM
+    center = np.array(com)
+    centered_vertices = hull_vertices - center
+
+    # Convert inertia tensor to numpy array for diagonalization
+    inertia = np.array(inertia_tensor).reshape(3, 3)
+
+    # Get principal axes by diagonalizing inertia tensor
+    eigenvalues, eigenvectors = np.linalg.eigh(inertia)
+
+    # Sort by eigenvalues in ascending order (largest inertia = smallest dimension)
+    # This helps with consistent ordering
+    sorted_indices = np.argsort(eigenvalues)
+    eigenvectors = eigenvectors[:, sorted_indices]
+
+    # Ensure no reflection in the transformation
+    if np.linalg.det(eigenvectors) < 0:
+        eigenvectors[:, 2] *= -1
+
+    principal_axes = eigenvectors
+
+    # Convert principal axes rotation matrix to quaternion
+    # The principal_axes matrix transforms from world to principal frame
+    base_quat = wp.quat_from_matrix(wp.mat33(principal_axes.T.flatten()))
+
+    # Step 3: Warp kernel search
+    # Allocate 2D arrays: (num_angle_steps, 3 axes)
+    vertices_wp = wp.array(centered_vertices, dtype=wp.vec3)
+    volumes = wp.zeros((num_angle_steps, 3), dtype=float)
+    transforms = wp.zeros((num_angle_steps, 3), dtype=wp.transform)
+    extents = wp.zeros((num_angle_steps, 3), dtype=wp.vec3)
+
+    # Launch kernel with 2D dimensions
+    wp.launch(
+        compute_obb_candidates,
+        dim=(num_angle_steps, 3),
+        inputs=[vertices_wp, base_quat, volumes, transforms, extents],
+    )
+
+    # Find minimum volume
+    volumes_host = volumes.numpy()
+    best_idx = np.unravel_index(np.argmin(volumes_host), volumes_host.shape)
+
+    # Get results
+    best_transform = transforms.numpy()[best_idx]
+    best_extents = extents.numpy()[best_idx]
+
+    # Adjust transform to account for original center
+    best_transform[0:3] += center
+
+    return wp.transform(*best_transform), wp.vec3(*best_extents)
+
+
 def load_mesh(filename: str, method: str | None = None):
     """
     Loads a 3D triangular surface mesh from a file.
@@ -148,24 +303,24 @@ def load_mesh(filename: str, method: str | None = None):
 
     def load_mesh_with_method(method):
         if method == "meshio":
-            import meshio  # noqa: PLC0415
+            import meshio
 
             m = meshio.read(filename)
             mesh_points = np.array(m.points)
             mesh_indices = np.array(m.cells[0].data, dtype=np.int32)
         elif method == "openmesh":
-            import openmesh  # noqa: PLC0415
+            import openmesh
 
             m = openmesh.read_trimesh(filename)
             mesh_points = np.array(m.points())
             mesh_indices = np.array(m.face_vertex_indices(), dtype=np.int32)
         elif method == "pcu":
-            import point_cloud_utils as pcu  # noqa: PLC0415
+            import point_cloud_utils as pcu
 
             mesh_points, mesh_indices = pcu.load_mesh_vf(filename)
             mesh_indices = mesh_indices.flatten()
         else:
-            import trimesh  # noqa: PLC0415
+            import trimesh
 
             m = trimesh.load(filename)
             if hasattr(m, "geometry"):
@@ -209,7 +364,7 @@ def visualize_meshes(
 ):
     """Render meshes in a grid with matplotlib."""
 
-    import matplotlib.pyplot as plt  # noqa: PLC0415
+    import matplotlib.pyplot as plt
 
     if titles is None:
         titles = []
@@ -297,7 +452,7 @@ def remesh_ftetwild(vertices, faces, optimize=False, edge_length_fac=0.05, verbo
         if the remeshing fails.
     """
 
-    from pytetwild import tetrahedralize  # noqa: PLC0415
+    from pytetwild import tetrahedralize
 
     def tet_fn(v, f):
         return tetrahedralize(v, f, optimize=optimize, edge_length_fac=edge_length_fac)
@@ -353,7 +508,7 @@ def remesh_alphashape(vertices, alpha: float = 3.0):
     Returns:
         A tuple (vertices, faces) containing the remeshed mesh.
     """
-    import alphashape  # noqa: PLC0415
+    import alphashape
 
     with silence_stdio():
         alpha_shape = alphashape.alphashape(vertices, alpha)
@@ -374,7 +529,7 @@ def remesh_quadratic(vertices, faces, target_reduction=0.5, target_count=None, *
     Returns:
         A tuple (vertices, faces) containing the remeshed mesh.
     """
-    from fast_simplification import simplify  # noqa: PLC0415
+    from fast_simplification import simplify
 
     return simplify(vertices, faces, target_reduction=target_reduction, target_count=target_count, **kwargs)
 
@@ -394,7 +549,7 @@ def remesh_convex_hull(vertices, maxhullvert: int = 0):
         - faces: A numpy array of shape (K, 3) containing the vertex indices of the triangular faces of the convex hull.
     """
 
-    from scipy.spatial import ConvexHull  # noqa: PLC0415
+    from scipy.spatial import ConvexHull
 
     qhull_options = "Qt"
     if maxhullvert > 0:
@@ -423,7 +578,7 @@ def remesh_convex_hull(vertices, maxhullvert: int = 0):
     return verts, faces
 
 
-RemeshingMethod = Literal["ftetwild", "alphashape", "quadratic", "convex_hull"]
+RemeshingMethod = Literal["ftetwild", "alphashape", "quadratic", "convex_hull", "poisson"]
 
 
 def remesh(
@@ -435,7 +590,8 @@ def remesh(
     Args:
         vertices: A numpy array of shape (N, 3) containing the vertex positions.
         faces: A numpy array of shape (M, 3) containing the vertex indices of the faces.
-        method: The remeshing method to use. One of "ftetwild", "quadratic", "convex_hull", or "alphashape".
+        method: The remeshing method to use. One of "ftetwild", "quadratic", "convex_hull",
+            "alphashape", or "poisson".
         visualize: Whether to render the input and output meshes using matplotlib.
         **remeshing_kwargs: Additional keyword arguments passed to the remeshing function.
 
@@ -450,6 +606,10 @@ def remesh(
         new_vertices, new_faces = remesh_quadratic(vertices, faces, **remeshing_kwargs)
     elif method == "convex_hull":
         new_vertices, new_faces = remesh_convex_hull(vertices, **remeshing_kwargs)
+    elif method == "poisson":
+        from newton._src.geometry.remesh import remesh_poisson  # noqa: PLC0415
+
+        new_vertices, new_faces = remesh_poisson(vertices, faces, **remeshing_kwargs)
     else:
         raise ValueError(f"Unknown remeshing method: {method}")
 
@@ -478,7 +638,7 @@ def remesh_mesh(
     Args:
         mesh (Mesh): The mesh to be remeshed.
         method (RemeshingMethod, optional): The remeshing method to use.
-            One of "ftetwild", "quadratic", "convex_hull", or "alphashape".
+            One of "ftetwild", "quadratic", "convex_hull", "alphashape", or "poisson".
             Defaults to "quadratic".
         recompute_inertia (bool, optional): If True, recompute the mass, center of mass,
             and inertia tensor of the mesh after remeshing. Defaults to False.
@@ -496,81 +656,56 @@ def remesh_mesh(
         mesh.vertices = vertices
         mesh.indices = indices.flatten()
         if recompute_inertia:
-            mesh.mass, mesh.com, mesh.I, _ = compute_mesh_inertia(1.0, vertices, indices, is_solid=mesh.is_solid)
+            mesh.mass, mesh.com, mesh.inertia, _ = compute_inertia_mesh(1.0, vertices, indices, is_solid=mesh.is_solid)
     else:
         return mesh.copy(vertices=vertices, indices=indices, recompute_inertia=recompute_inertia)
     return mesh
-
-
-def create_box_mesh(half_extents: Vec3) -> tuple[nparray, nparray]:
-    x_extent, y_extent, z_extent = half_extents
-    vertices = np.array(
-        [
-            [-x_extent, -y_extent, -z_extent],
-            [x_extent, -y_extent, -z_extent],
-            [x_extent, y_extent, -z_extent],
-            [-x_extent, y_extent, -z_extent],
-            [-x_extent, -y_extent, z_extent],
-            [x_extent, -y_extent, z_extent],
-            [x_extent, y_extent, z_extent],
-            [-x_extent, y_extent, z_extent],
-        ],
-        dtype=np.float32,
-    )
-    indices = np.array(
-        [
-            # Bottom face (z = -z_extent)
-            0,
-            2,
-            1,
-            0,
-            3,
-            2,
-            # Top face (z = z_extent)
-            4,
-            5,
-            6,
-            4,
-            6,
-            7,
-            # Front face (y = -y_extent)
-            0,
-            1,
-            5,
-            0,
-            5,
-            4,
-            # Back face (y = y_extent)
-            2,
-            3,
-            7,
-            2,
-            7,
-            6,
-            # Left face (x = -x_extent)
-            0,
-            4,
-            7,
-            0,
-            7,
-            3,
-            # Right face (x = x_extent)
-            1,
-            2,
-            6,
-            1,
-            6,
-            5,
-        ],
-        dtype=np.int32,
-    )
-    return vertices, indices
 
 
 def transform_points(points: nparray, transform: wp.transform, scale: Vec3 | None = None) -> nparray:
     if scale is not None:
         points = points * np.array(scale, dtype=np.float32)
     return points @ np.array(wp.quat_to_matrix(transform.q)).reshape(3, 3) + transform.p
+
+
+@wp.kernel(enable_backward=False)
+def get_total_kernel(
+    counts: wp.array(dtype=int),
+    prefix_sums: wp.array(dtype=int),
+    num_elements: wp.array(dtype=int),
+    max_elements: int,
+    total: wp.array(dtype=int),
+):
+    """
+    Get the total of an array of counts and prefix sums.
+    """
+    if num_elements[0] <= 0 or max_elements <= 0:
+        total[0] = 0
+        return
+
+    # Clip to array bounds to avoid out-of-bounds access
+    n = wp.min(num_elements[0], max_elements)
+    final_idx = n - 1
+    total[0] = prefix_sums[final_idx] + counts[final_idx]
+
+
+def scan_with_total(
+    counts: wp.array(dtype=int),
+    prefix_sums: wp.array(dtype=int),
+    num_elements: wp.array(dtype=int),
+    total: wp.array(dtype=int),
+):
+    """
+    Computes an exclusive prefix sum and total of a counts array.
+
+    Args:
+        counts: Input array of per-element counts.
+        prefix_sums: Output array for exclusive prefix sums (same size as counts).
+        num_elements: Single-element array containing the number of valid elements in counts.
+        total: Single-element output array that will contain the sum of all counts.
+    """
+    wp.utils.array_scan(counts, prefix_sums, inclusive=False)
+    wp.launch(get_total_kernel, dim=[1], inputs=[counts, prefix_sums, num_elements, counts.shape[0], total])
 
 
 __all__ = ["compute_shape_radius", "load_mesh", "visualize_meshes"]

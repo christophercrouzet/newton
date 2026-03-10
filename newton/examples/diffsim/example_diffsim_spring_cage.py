@@ -15,7 +15,7 @@
 
 
 ###########################################################################
-# Example Diff Sim Spring Cage
+# Example Diffsim Spring Cage
 #
 # A single particle is attached with springs to each point of a cage.
 # The objective is to optimize the rest length of the springs in order
@@ -29,6 +29,8 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton.tests.unittest_utils import most
+from newton.utils import bourke_color_map
 
 
 @wp.kernel
@@ -65,6 +67,7 @@ class Example:
 
         # setup training parameters
         self.train_iter = 0
+
         # Factor by which the rest lengths of the springs are adjusted after each
         # iteration, relatively to the corresponding gradients. Lower values
         # converge more slowly but have less chances to miss the local minimum.
@@ -78,6 +81,7 @@ class Example:
         # particle to the target position. It needs to be defined as an array
         # so that it can be written out by a kernel.
         self.loss = wp.zeros(1, dtype=float, requires_grad=True)
+        self.loss_history = []
 
         # setup rendering
         self.viewer = viewer
@@ -112,7 +116,7 @@ class Example:
         # use `requires_grad=True` to create a model for differentiable simulation
         self.model = scene.finalize(requires_grad=True)
 
-        # Use the Euler integrator for stepping through the simulation.
+        # Use the SemiImplicit integrator for stepping through the simulation.
         self.solver = newton.solvers.SolverSemiImplicit(self.model)
 
         # allocate sim states for trajectory (control and contacts are not used in this example)
@@ -157,17 +161,50 @@ class Example:
             outputs=(self.loss,),
         )
 
+        return self.loss
+
     def simulate(self, sim_step):
         for i in range(self.sim_substeps):
             t = sim_step * self.sim_substeps + i
             self.states[t].clear_forces()
             self.solver.step(self.states[t], self.states[t + 1], self.control, self.contacts, self.sim_dt)
 
+    def check_grad(self):
+        param = self.model.spring_rest_length
+        x_c = param.numpy().flatten()
+        x_grad_numeric = np.zeros_like(x_c)
+        for i in range(len(x_c)):
+            eps = 1.0e-3
+            step = np.zeros_like(x_c)
+            step[i] = eps
+            x_1 = x_c + step
+            x_0 = x_c - step
+            param.assign(x_1)
+            l_1 = self.forward().numpy()[0]
+            param.assign(x_0)
+            l_0 = self.forward().numpy()[0]
+            dldx = (l_1 - l_0) / (eps * 2.0)
+            x_grad_numeric[i] = dldx
+        param.assign(x_c)
+        tape = wp.Tape()
+        with tape:
+            l = self.forward()
+        tape.backward(l)
+        x_grad_analytic = param.grad.numpy()[0].copy()
+        return x_grad_numeric, x_grad_analytic
+
+    def test_final(self):
+        x_grad_numeric, x_grad_analytic = self.check_grad()
+        assert np.allclose(x_grad_numeric, x_grad_analytic, atol=0.2)
+        assert all(np.array(self.loss_history) < 0.3)
+        assert most(np.diff(self.loss_history) < -0.0, min_ratio=0.5)
+
     def step(self):
         if self.graph:
             wp.capture_launch(self.graph)
         else:
             self.forward_backward()
+        self.loss_history.append(self.loss.numpy()[0])
 
         x = self.model.spring_rest_length
 
@@ -194,7 +231,13 @@ class Example:
         self.train_iter += 1
 
     def render(self):
-        for i in range(self.sim_steps + 1):
+        # for interactive viewing, we just render the final state at every frame
+        if isinstance(self.viewer, newton.viewer.ViewerGL):
+            start_frame = self.sim_steps
+        else:
+            start_frame = 0
+
+        for i in range(start_frame, self.sim_steps + 1):
             state = self.states[i]
             self.viewer.begin_frame(self.frame * self.frame_dt)
             self.viewer.log_state(state)
@@ -222,7 +265,7 @@ class Example:
             min_length = min(half_lengths)
             max_length = max(half_lengths)
             for l in range(len(half_lengths)):
-                color = wp.render.bourke_color_map(min_length, max_length, half_lengths[l])
+                color = bourke_color_map(min_length, max_length, half_lengths[l])
                 colors.append(color)
 
             # Draw line as sanity check
@@ -245,9 +288,11 @@ if __name__ == "__main__":
 
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init(parser)
+    if isinstance(viewer, newton.viewer.ViewerGL):
+        viewer.show_particles = True
 
     # Create example
     example = Example(viewer, verbose=args.verbose)
 
     # Run example
-    newton.examples.run(example)
+    newton.examples.run(example, args)

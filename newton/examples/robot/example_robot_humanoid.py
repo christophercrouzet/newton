@@ -19,7 +19,7 @@
 # Shows how to set up a simulation of a humanoid articulation
 # from MJCF using newton.ModelBuilder.add_mjcf().
 #
-# Command: python -m newton.examples robot_humanoid --num-envs 16
+# Command: python -m newton.examples robot_humanoid --world-count 16
 #
 ###########################################################################
 
@@ -27,17 +27,18 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton import JointTargetMode
 
 
 class Example:
-    def __init__(self, viewer, num_envs=4):
+    def __init__(self, viewer, world_count=4, args=None):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.num_envs = num_envs
+        self.world_count = world_count
 
         self.viewer = viewer
 
@@ -54,25 +55,36 @@ class Example:
             mjcf_filename,
             ignore_names=["floor", "ground"],
             xform=wp.transform(wp.vec3(0, 0, 1.3)),
+            parse_sites=False,  # AD: remove once asset is fixed
         )
 
-        for i in range(len(humanoid.joint_dof_mode)):
-            humanoid.joint_dof_mode[i] = newton.JointMode.TARGET_POSITION
+        for i in range(len(humanoid.joint_target_ke)):
             humanoid.joint_target_ke[i] = 150
             humanoid.joint_target_kd[i] = 5
+            humanoid.joint_target_mode[i] = int(JointTargetMode.POSITION)
 
         builder = newton.ModelBuilder()
-        builder.replicate(humanoid, self.num_envs, spacing=(3, 3, 0))
+        builder.replicate(humanoid, self.world_count)
 
         builder.add_ground_plane()
 
         self.model = builder.finalize()
-        self.solver = newton.solvers.SolverMuJoCo(self.model, njmax=100)
+        use_mujoco_contacts = args.use_mujoco_contacts if args is not None else False
+        self.solver = newton.solvers.SolverMuJoCo(
+            self.model,
+            njmax=100,
+            nconmax=65,
+            use_mujoco_contacts=use_mujoco_contacts,
+        )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+
+        # Evaluate forward kinematics for collision detection
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+
+        self.contacts = self.model.contacts()
 
         self.viewer.set_model(self.model)
 
@@ -86,7 +98,7 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0)
+        self.model.collide(self.state_0, self.contacts)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
@@ -112,16 +124,30 @@ class Example:
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
-    def test(self):
-        pass
+    def test_final(self):
+        newton.examples.test_body_state(
+            self.model,
+            self.state_0,
+            "all bodies are above the ground",
+            lambda q, qd: q[2] > 0.01,
+        )
+        threshold = 0.1
+        if self.sim_time < 0.2:
+            threshold = 1.0
+        newton.examples.test_body_state(
+            self.model,
+            self.state_0,
+            "all humanoids have come to a rest",
+            lambda q, qd: max(abs(qd)) < threshold,
+        )
 
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
-    parser.add_argument("--num-envs", type=int, default=4, help="Total number of simulated environments.")
+    parser.add_argument("--world-count", type=int, default=4, help="Total number of simulated worlds.")
 
     viewer, args = newton.examples.init(parser)
 
-    example = Example(viewer, args.num_envs)
+    example = Example(viewer, args.world_count, args)
 
-    newton.examples.run(example)
+    newton.examples.run(example, args)

@@ -1,3 +1,6 @@
+.. SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+.. SPDX-License-Identifier: CC-BY-4.0
+
 newton.ik
 =========
 
@@ -9,9 +12,13 @@ newton.ik
    :toctree: _generated
    :nosignatures:
 
-   IKJacobianMode
-   IKJointLimitObjective
+   IKJacobianType
    IKObjective
-   IKPositionObjective
-   IKRotationObjective
+   IKObjectiveJointLimit
+   IKObjectivePosition
+   IKObjectiveRotation
+   IKOptimizer
+   IKOptimizerLBFGS
+   IKOptimizerLM
+   IKSampler
    IKSolver

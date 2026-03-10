@@ -13,40 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import ik
-from .articulation import eval_fk, eval_ik
+from .articulation import eval_fk, eval_ik, eval_jacobian, eval_mass_matrix
 from .builder import ModelBuilder
-from .collide import CollisionPipeline, count_rigid_contact_points
+from .collide import CollisionPipeline
 from .contacts import Contacts
 from .control import Control
-from .graph_coloring import color_graph, plot_graph
 from .joints import (
     EqType,
-    JointMode,
+    JointTargetMode,
     JointType,
-    get_joint_dof_count,
 )
 from .model import Model
 from .state import State
-from .style3d import Style3DModel, Style3DModelBuilder
 
 __all__ = [
     "CollisionPipeline",
     "Contacts",
     "Control",
     "EqType",
-    "JointMode",
+    "JointTargetMode",
     "JointType",
     "Model",
     "ModelBuilder",
     "State",
-    "Style3DModel",
-    "Style3DModelBuilder",
-    "color_graph",
-    "count_rigid_contact_points",
     "eval_fk",
     "eval_ik",
-    "get_joint_dof_count",
-    "ik",
-    "plot_graph",
+    "eval_jacobian",
+    "eval_mass_matrix",
 ]
